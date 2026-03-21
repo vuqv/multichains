@@ -39,7 +39,7 @@ The Jupyter notebooks under `benchmark/` may need extra packages (e.g. `jupyterl
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/<your-username>/multichains.git
+   git clone git@github.com:vuqv/multichains.git
    cd multichains
    ```
 
