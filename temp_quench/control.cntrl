@@ -18,7 +18,7 @@ mdsteps = 100_000_000
 heating_steps = 1_000_000
 
 #Directory to store the trajectory
-traj_dir = traj_error 
+traj_dir = traj
 
 use_gpu = yes
 # frequency to write dcd and checkpoint file
