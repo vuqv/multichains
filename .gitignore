@@ -1,0 +1,19 @@
+# Molecular dynamics trajectories
+*.dcd
+*.xtc
+*.trr
+*.tng
+*.nc
+*.h5
+*.hdf5
+
+traj/
+**/traj/
+
+# OS junk
+.DS_Store
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*~
