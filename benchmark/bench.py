@@ -497,8 +497,10 @@ nstlog = int(cfg["nstlog"])
 restart = bool(strtobool(cfg["restart"]))
 use_gpu = bool(strtobool(cfg["use_gpu"]))
 
-if "n_copies" in cfg:
-    n_copies = int(cfg["n_copies"])
+if "copies_list" in cfg:
+    copies_list = [int(x) for x in cfg["copies_list"].split(",")]
+else:
+    copies_list = [1, 2, 4]
 
 # checkpoint file
 cpfile = outname + '.chk'
@@ -547,8 +549,6 @@ else:
     platform = Platform.getPlatformByName('CPU')
 
 positions = cor.positions
-
-copies_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
 
 df = benchmark_gpu(system, top, positions, copies_list, gpu_stats)
 df_print = df.round(2)

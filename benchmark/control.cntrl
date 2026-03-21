@@ -4,22 +4,20 @@ secondary_structure_def = setup/secondary_struc_defs.txt
 native_cor = setup/Q04894_clean_ca.cor
 corfile = setup/Q04894_clean_ca.cor
 
-temp_heating = 600
 temp_prod = 300
 ppn = 1
 outname = test
 # performed production run in 10^8 steps= 1.5 microseconds
-mdsteps = 200_000
-
-# equilibrium in 15 ns
-heating_steps = 1_000
+mdsteps = 2_000
 
 #Directory to store the trajectory
 traj_dir = traj
+# list of number of copies to run benchmark
+copies_list = 1, 2, 4
 
 use_gpu = yes
 # frequency to write dcd and checkpoint file
-nstxout = 5000
-nstlog = 5000
+nstxout = 10
+nstlog = 10
 # for analysis of folding pathway, set nsteps_calQ = nstxout to sim runs faster.
 restart = no
