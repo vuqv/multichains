@@ -1,14 +1,99 @@
+#!/usr/bin/env python3
 import copy
 import getopt
 import os
+import platform as py_platform
+import shutil
+import socket
+import subprocess
 import sys
+import time
+from datetime import datetime
 from distutils.util import strtobool
 
 import numpy as np
+import openmm as _openmm_pkg
 import parmed as pmd
 from openmm import *
 from openmm.app import *
 from openmm.unit import *
+
+
+###### tracking helpers (non-simulation metadata logging) ######
+def _module_version(module):
+    """Best-effort version string for a Python module."""
+    return getattr(module, "__version__", "unknown")
+
+
+def _safe_platform_property(simulation, key):
+    """Best-effort OpenMM platform property lookup."""
+    try:
+        return simulation.context.getPlatform().getPropertyValue(simulation.context, key)
+    except Exception:
+        return "not available"
+
+
+def _collect_cuda_metadata(simulation):
+    """Collect CUDA/device metadata when available."""
+    cuda_info = {}
+
+    # OpenMM platform properties (best effort)
+    keys = [
+        "CudaDeviceName",
+        "CudaDriverVersion",
+        "CudaRuntimeVersion",
+        "CudaCompiler",
+        "CudaPrecision",
+        "DeviceIndex",
+    ]
+    for key in keys:
+        value = _safe_platform_property(simulation, key)
+        if value != "not available":
+            cuda_info[key] = value
+
+    # nvidia-smi query (best effort, friendlier diagnostics)
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi is None:
+        cuda_info["nvidia_smi"] = "not available (nvidia-smi not found on PATH)"
+    else:
+        try:
+            proc = subprocess.run(
+                [
+                    nvidia_smi,
+                    "--query-gpu=name,driver_version",
+                    "--format=csv,noheader",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if proc.returncode == 0:
+                smi = proc.stdout.strip()
+                cuda_info["nvidia_smi"] = smi if smi else "available but no GPU rows returned"
+            elif proc.returncode == 2:
+                cuda_info["nvidia_smi"] = (
+                    "not available (nvidia-smi returned code 2; "
+                    "likely no accessible NVIDIA GPU/driver in this environment)"
+                )
+            else:
+                stderr_msg = (proc.stderr or proc.stdout).strip()
+                cuda_info["nvidia_smi"] = (
+                    f"not available (nvidia-smi exit code {proc.returncode}: {stderr_msg})"
+                )
+        except subprocess.TimeoutExpired:
+            cuda_info["nvidia_smi"] = "not available (nvidia-smi query timed out)"
+        except Exception as e:
+            cuda_info["nvidia_smi"] = f"not available (nvidia-smi query failed: {e})"
+
+    return cuda_info
+
+
+def _write_tracking_section(path, section_name, kv_pairs, mode="a"):
+    """Write one metadata section to run-info log file."""
+    with open(path, mode) as f:
+        f.write(f"\n[{section_name}]\n")
+        for k, v in kv_pairs.items():
+            f.write(f"{k}: {v}\n")
 
 
 def read_control_file(path: str) -> dict[str, str]:
@@ -321,6 +406,11 @@ def replicate_topology(template_topology, n_copies):
 
     return full_topology
 
+############## MAIN #################
+script_start_epoch = time.time()
+script_start_iso = datetime.now().astimezone().isoformat()
+
+
 usage = '\nUsage: python single_run.py -f control_file\n'
 ############## MAIN #################
 ctrlfile = ''
@@ -351,18 +441,10 @@ _CONTROL_KEYS_REQUIRED = (
     "psffile",
     "corfile",
     "prmfile",
-    "temp_heating",
     "temp_prod",
-    "ppn",
     "outname",
-    "traj_dir",
     "mdsteps",
     "heating_steps",
-    "nstxout",
-    "nstlog",
-    "n_copies",
-    "restart",
-    "use_gpu",
 )
 _missing = [k for k in _CONTROL_KEYS_REQUIRED if k not in cfg]
 if _missing:
@@ -372,23 +454,27 @@ if _missing:
 psffile = cfg["psffile"]
 corfile = cfg["corfile"]
 prmfile = cfg["prmfile"]
-temp_heating = float(cfg["temp_heating"]) * kelvin
+temp_heating = float(cfg.get("temp_heating", "600")) * kelvin
 temp_prod = float(cfg["temp_prod"]) * kelvin
-ppn = str(cfg["ppn"])
+ppn = str(cfg.get("ppn", "1"))
 outname = cfg["outname"]
-traj_dir = cfg["traj_dir"]
+traj_dir = cfg.get("traj_dir", ".").strip() or "."
 mdsteps = int(cfg["mdsteps"])
 heating_steps = int(cfg["heating_steps"])
-nstxout = int(cfg["nstxout"])
-nstlog = int(cfg["nstlog"])
-n_copies = int(cfg["n_copies"])
-restart = bool(strtobool(cfg["restart"]))
-use_gpu = bool(strtobool(cfg["use_gpu"]))
+nstxout = int(cfg.get("nstxout", "5000"))
+nstlog = int(cfg.get("nstlog", "5000"))
+n_copies = int(cfg.get("n_copies", "1"))
+restart = bool(strtobool(cfg.get("restart", "no")))
+use_gpu = bool(strtobool(cfg.get("use_gpu", "yes")))
 
-# check if traj_dir exists, if not, create it
-if not os.path.exists(traj_dir):
-    os.makedirs(traj_dir, exist_ok=True)
+# Only create a subdirectory; default "." is the cwd and must not be mkdir'd
+if os.path.normpath(traj_dir) != ".":
+    if not os.path.exists(traj_dir):
+        os.makedirs(traj_dir, exist_ok=True)
 
+# checkpoint file
+cpfile = f"{traj_dir}/{outname}.chk"
+runinfo_file = outname + "_runinfo.log"
 timestep = 0.015 * picoseconds
 fbsolu = 0.05 / picosecond
 
@@ -439,7 +525,7 @@ full_system = replicate_cg_system_intra_only(system, n_copies)
 full_topology = replicate_topology(top, n_copies)
 full_positions = replicate_positions(positions, n_copies)
 full_structure = pmd.openmm.load_topology(full_topology, system=full_system, xyz=full_positions)
-full_structure.save(f"{traj_dir}/{outname}_n{n_copies}.psf", overwrite=True)
+full_structure.save(f"{traj_dir}/top.psf", overwrite=True)
 
 # Heating to high temperature
 print(f"Heating to high temperature: {temp_heating} K for {heating_steps} steps")
@@ -449,9 +535,9 @@ simulation = Simulation(full_topology, full_system, integrator, platform, proper
 simulation.context.setPositions(full_positions)
 simulation.context.setVelocitiesToTemperature(temp_heating)
 simulation.reporters = []
-simulation.reporters.append(DCDReporter(f"{traj_dir}/{outname}_n{n_copies}_heating.dcd", nstxout, append=False))
+simulation.reporters.append(DCDReporter(f"{traj_dir}/{outname}_heating.dcd", nstxout, append=False))
 simulation.reporters.append(
-    StateDataReporter(f"{traj_dir}/{outname}_n{n_copies}_heating.log", nstlog, step=True, time=True, potentialEnergy=True, kineticEnergy=True,
+    StateDataReporter(f"{traj_dir}/{outname}_heating.log", nstlog, step=True, time=True, potentialEnergy=True, kineticEnergy=True,
                         totalEnergy=True, temperature=True, speed=True, separator='\t'))
 simulation.step(heating_steps)
 # Get the final positions after heating
@@ -464,10 +550,66 @@ simulation = Simulation(full_topology, full_system, integrator, platform, proper
 simulation.context.setPositions(final_positions)
 simulation.context.setVelocitiesToTemperature(temp_prod)
 simulation.reporters = []
-simulation.reporters.append(DCDReporter(f"{traj_dir}/{outname}_n{n_copies}_quench.dcd", nstxout, append=False))
+simulation.reporters.append(DCDReporter(f"{traj_dir}/{outname}_quench.dcd", nstxout, append=False))
 simulation.reporters.append(
-    StateDataReporter(f"{traj_dir}/{outname}_n{n_copies}_quench.log", nstlog, step=True, time=True, potentialEnergy=True, kineticEnergy=True,
+    StateDataReporter(f"{traj_dir}/{outname}_quench.log", nstlog, step=True, time=True, potentialEnergy=True, kineticEnergy=True,
                         totalEnergy=True, temperature=True, speed=True, separator='\t'))
+
+# run production simulation
+start_time = time.time()
+# Tracking-only metadata write (does not affect simulation behavior)
+_write_tracking_section(
+    runinfo_file,
+    "run_start",
+    {
+        "start_time_iso": script_start_iso,
+        "control_file": ctrlfile,
+        "restart_mode": restart,
+        "python_version": sys.version.replace("\n", " "),
+        "numpy_version": _module_version(np),
+        "parmed_version": _module_version(pmd),
+        "openmm_version": _module_version(_openmm_pkg),
+        "hostname": socket.gethostname(),
+        "os": py_platform.platform(),
+        "machine": py_platform.machine(),
+        "processor": py_platform.processor() or "not reported",
+        "cpu_count": os.cpu_count(),
+        "requested_threads_ppn": ppn,
+        "selected_platform": simulation.context.getPlatform().getName(),
+        "use_gpu": use_gpu,
+    },
+    mode="w",
+)
+if use_gpu:
+    _write_tracking_section(
+        runinfo_file,
+        "cuda_metadata",
+        _collect_cuda_metadata(simulation),
+    )
+print(f"[tracking] writing runtime metadata to {runinfo_file}")
+
 simulation.step(mdsteps)
+
+# save checkpoint for the last state, before simulation is terminated
+simulation.saveCheckpoint(cpfile)
+# Tracking-only end-of-run metadata
+script_end_epoch = time.time()
+script_end_iso = datetime.now().astimezone().isoformat()
+elapsed_seconds = script_end_epoch - script_start_epoch
+_write_tracking_section(
+    runinfo_file,
+    "run_end",
+    {
+        "end_time_iso": script_end_iso,
+        "elapsed_seconds": f"{elapsed_seconds:.2f}",
+        "elapsed_hours": f"{elapsed_seconds/60/60:.4f}",
+        "final_step": simulation.context.getState().getStepCount(),
+        "final_time_ns": f"{simulation.context.getState().getTime().value_in_unit(nanosecond):.6f}",
+    },
+)
+print(
+    f"[tracking] end={script_end_iso}, elapsed={elapsed_seconds:.2f}s "
+    f"({elapsed_seconds/60/60:.4f} h)"
+)
 
 
