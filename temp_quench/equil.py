@@ -444,7 +444,6 @@ _CONTROL_KEYS_REQUIRED = (
     "temp_prod",
     "outname",
     "mdsteps",
-    # "heating_steps",
 )
 _missing = [k for k in _CONTROL_KEYS_REQUIRED if k not in cfg]
 if _missing:
@@ -454,9 +453,7 @@ if _missing:
 psffile = cfg["psffile"]
 corfile = cfg["corfile"]
 prmfile = cfg["prmfile"]
-# high temperature to unfold protein
-temp_heating = float(cfg.get("temp_heating", "600")) * kelvin
-heating_steps = int(cfg.get("heating_steps", "1000000"))
+
 # production run
 temp_prod = float(cfg["temp_prod"]) * kelvin
 mdsteps = int(cfg["mdsteps"])
@@ -478,9 +475,9 @@ if os.path.normpath(traj_dir) != ".":
     if not os.path.exists(traj_dir):
         os.makedirs(traj_dir, exist_ok=True)
 
-# checkpoint file (optional override path in control file)
-cpfile = cfg.get("checkpoint_file", "").strip() or f"{traj_dir}/{outname}.chk"
-runinfo_file = outname + "_runinfo.log"
+# checkpoint file
+cpfile = f"{traj_dir}/{outname}.chk"
+runinfo_file = f"{traj_dir}/{outname}_runinfo.log"
 timestep = 0.015 * picoseconds
 fbsolu = 0.05 / picosecond
 
@@ -533,79 +530,19 @@ full_positions = replicate_positions(positions, n_copies)
 full_structure = pmd.openmm.load_topology(full_topology, system=full_system, xyz=full_positions)
 full_structure.save(f"{traj_dir}/top.psf", overwrite=True)
 
-restart_from_chk = restart and os.path.isfile(cpfile)
-if restart and not os.path.isfile(cpfile):
-    print(
-        f"[warning] restart=yes but checkpoint not found ({cpfile}); "
-        "running full heating + production protocol."
-    )
-    restart_from_chk = False
+# Production run
+print(f"Running simulation at: {temp_prod} K for {mdsteps} steps")
+integrator = LangevinIntegrator(temp_prod, fbsolu, timestep)
+integrator.setConstraintTolerance(0.00001)
+simulation = Simulation(full_topology, full_system, integrator, platform, properties)
 
-if restart_from_chk:
-    # Continue production only: same System/Topology/integrator type as when the checkpoint was saved.
-    print(f"Restarting from checkpoint: {cpfile}")
-    integrator = LangevinIntegrator(temp_prod, fbsolu, timestep)
-    integrator.setConstraintTolerance(0.00001)
-    simulation = Simulation(full_topology, full_system, integrator, platform, properties)
-    try:
-        simulation.loadCheckpoint(cpfile)
-    except Exception as exc:
-        print(f"Error: could not load checkpoint {cpfile}: {exc}")
-        sys.exit(1)
-    steps_done = simulation.context.getState().getStepCount()
-    steps_to_run = max(0, mdsteps - steps_done)
-    print(
-        f"Checkpoint step count={steps_done}, production target mdsteps={mdsteps} "
-        f"→ running {steps_to_run} additional steps."
-    )
-    simulation.reporters = []
-    simulation.reporters.append(
-        DCDReporter(f"{traj_dir}/{outname}_quench.dcd", nstxout, append=True)
-    )
-    simulation.reporters.append(
-        StateDataReporter(
-            f"{traj_dir}/{outname}_quench.log",
-            nstlog,
-            step=True,
-            time=True,
-            potentialEnergy=True,
-            kineticEnergy=True,
-            totalEnergy=True,
-            temperature=True,
-            speed=True,
-            separator="\t",
-            append=True,
-        )
-    )
-else:
-    # Heating to high temperature
-    print(f"Heating to high temperature: {temp_heating} K for {heating_steps} steps")
-    integrator = LangevinIntegrator(temp_heating, fbsolu, timestep)
-    integrator.setConstraintTolerance(0.00001)
-    simulation = Simulation(full_topology, full_system, integrator, platform, properties)
-    simulation.context.setPositions(full_positions)
-    simulation.context.setVelocitiesToTemperature(temp_heating)
-    simulation.reporters = []
-    simulation.reporters.append(DCDReporter(f"{traj_dir}/{outname}_heating.dcd", nstxout, append=False))
-    simulation.reporters.append(
-        StateDataReporter(f"{traj_dir}/{outname}_heating.log", nstlog, step=True, time=True, potentialEnergy=True, kineticEnergy=True,
-                            totalEnergy=True, temperature=True, speed=True, separator='\t'))
-    simulation.step(heating_steps)
-    # Get the final positions after heating
-    final_positions = simulation.context.getState(getPositions=True).getPositions()
-    # Quench to low temperature (new context at temp_prod before production)
-    print(f"Quenching to low temperature: {temp_prod} K for {mdsteps} steps")
-    integrator = LangevinIntegrator(temp_prod, fbsolu, timestep)
-    integrator.setConstraintTolerance(0.00001)
-    simulation = Simulation(full_topology, full_system, integrator, platform, properties)
-    simulation.context.setPositions(final_positions)
-    simulation.context.setVelocitiesToTemperature(temp_prod)
-    simulation.reporters = []
-    simulation.reporters.append(DCDReporter(f"{traj_dir}/{outname}_quench.dcd", nstxout, append=False))
-    simulation.reporters.append(
-        StateDataReporter(f"{traj_dir}/{outname}_quench.log", nstlog, step=True, time=True, potentialEnergy=True, kineticEnergy=True,
-                            totalEnergy=True, temperature=True, speed=True, separator='\t'))
-    steps_to_run = mdsteps
+simulation.context.setPositions(full_positions)
+simulation.context.setVelocitiesToTemperature(temp_prod)
+simulation.reporters = []
+simulation.reporters.append(DCDReporter(f"{traj_dir}/{outname}_equil.dcd", nstxout, append=False))
+simulation.reporters.append(
+    StateDataReporter(f"{traj_dir}/{outname}_equil.log", nstlog, step=True, time=True, potentialEnergy=True, kineticEnergy=True,
+                        totalEnergy=True, temperature=True, speed=True, separator='\t'))
 
 # run production simulation
 start_time = time.time()
@@ -616,9 +553,7 @@ _write_tracking_section(
     {
         "start_time_iso": script_start_iso,
         "control_file": ctrlfile,
-        "checkpoint_file": cpfile,
-        "restart_mode": restart_from_chk,
-        "production_steps_planned": steps_to_run,
+        "restart_mode": restart,
         "python_version": sys.version.replace("\n", " "),
         "numpy_version": _module_version(np),
         "parmed_version": _module_version(pmd),
@@ -642,7 +577,7 @@ if use_gpu:
     )
 print(f"[tracking] writing runtime metadata to {runinfo_file}")
 
-simulation.step(steps_to_run)
+simulation.step(mdsteps)
 
 # save checkpoint for the last state, before simulation is terminated
 simulation.saveCheckpoint(cpfile)
