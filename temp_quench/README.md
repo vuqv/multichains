@@ -5,7 +5,7 @@ This folder contains scripts to run a two-stage coarse-grained OpenMM workflow o
 1. **Heating stage** at high temperature (`temp_heating`) for unfolding/equilibration.
 2. **Quenching/production stage** at low temperature (`temp_prod`) for long folding dynamics.
 
-Both scripts read a plain-text control file (`key = value`) and support restart from checkpoint for long quench runs.
+All scripts read a plain-text control file (`key = value`).
 
 ## Files
 
@@ -53,17 +53,20 @@ This design protects long low-temperature runs from losing all progress after in
 `equil.py` is for a simpler one-stage protocol (no heating/quenching split):
 
 1. Read `control.cfg` and build replicated multi-copy system (`n_copies`).
-2. Initialize velocities at `temp_prod`.
-3. Run one continuous simulation for `mdsteps`.
+2. Choose run mode:
+   - If `restart = yes` and checkpoint exists: load checkpoint and continue to `mdsteps`.
+   - Otherwise: initialize positions/velocities and start from step 0.
+3. Run simulation at `temp_prod` for remaining steps.
 4. Write outputs:
    - trajectory: `{outname}_equil.dcd`
    - log: `{outname}_equil.log`
-   - final checkpoint: `{outname}.chk`
+   - checkpoint: default `{outname}.chk` (or `checkpoint_file` if provided)
 
 Important behavior notes for `equil.py`:
 
-- It does **not** implement restart-from-checkpoint flow (even if `restart` appears in config).
-- It does **not** use periodic checkpoint interval (`nstchk`); only final checkpoint is written.
+- It **does** support restart-from-checkpoint flow (`restart = yes`).
+- It **does** support periodic checkpoints via `nstchk` (if `nstchk > 0`).
+- It always writes a final checkpoint at the end.
 - It uses the same replicated intramolecular-only multi-copy setup as the quench scripts.
 
 ## Difference: `temp_quench.py` vs `temp_quench_v2.py`
@@ -93,6 +96,12 @@ In short: use `temp_quench.py` for the standard protocol, and `temp_quench_v2.py
 - `temp_quench_v2.py`: same as `temp_quench.py`, plus heating-only positional restraints (`restraint_idx`, `restraint_k`).
 
 ## Example Run
+
+```bash
+python equil.py -f control.cfg
+```
+
+or
 
 ```bash
 python temp_quench.py -f control.cfg
@@ -140,7 +149,7 @@ nstchk = 50000
 restart = no
 checkpoint_file = traj/test_run.chk
 
-# v2-only (ignored by temp_quench.py)
+# v2-only (ignored by temp_quench.py and equil.py)
 restraint_idx = 1-100
 restraint_k = 1000.0
 ```
@@ -150,4 +159,4 @@ For restart after interruption, set `restart = yes` and keep the same `checkpoin
 ## Control File Notes
 
 - `restraint_idx` and `restraint_k` are used only by `temp_quench_v2.py`.
-- Unknown keys are ignored by the parser, so one `control.cfg` can be reused across both scripts.
+- Unknown keys are ignored by the parser, so one `control.cfg` can be reused across all scripts in this folder.
