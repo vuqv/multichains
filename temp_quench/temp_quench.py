@@ -480,6 +480,7 @@ if os.path.normpath(traj_dir) != ".":
 
 # checkpoint file (optional override path in control file)
 cpfile = cfg.get("checkpoint_file", "").strip() or f"{traj_dir}/{outname}.chk"
+nstchk = int(cfg.get("nstchk", "50000"))
 runinfo_file = outname + "_runinfo.log"
 timestep = 0.015 * picoseconds
 fbsolu = 0.05 / picosecond
@@ -577,6 +578,9 @@ if restart_from_chk:
             append=True,
         )
     )
+    if nstchk > 0:
+        simulation.reporters.append(CheckpointReporter(cpfile, nstchk))
+        print(f"Periodic checkpointing enabled for quenching: every {nstchk} steps -> {cpfile}")
 else:
     # Heating to high temperature
     print(f"Heating to high temperature: {temp_heating} K for {heating_steps} steps")
@@ -605,6 +609,9 @@ else:
     simulation.reporters.append(
         StateDataReporter(f"{traj_dir}/{outname}_quench.log", nstlog, step=True, time=True, potentialEnergy=True, kineticEnergy=True,
                             totalEnergy=True, temperature=True, speed=True, separator='\t'))
+    if nstchk > 0:
+        simulation.reporters.append(CheckpointReporter(cpfile, nstchk))
+        print(f"Periodic checkpointing enabled for quenching: every {nstchk} steps -> {cpfile}")
     steps_to_run = mdsteps
 
 # run production simulation
