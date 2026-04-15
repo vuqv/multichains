@@ -465,6 +465,7 @@ traj_dir = cfg.get("traj_dir", ".").strip() or "."
 # log and output frequency
 nstxout = int(cfg.get("nstxout", "5000"))
 nstlog = int(cfg.get("nstlog", "5000"))
+nstchk = int(cfg.get("nstchk", "50000"))
 
 ppn = str(cfg.get("ppn", "1"))
 restart = bool(strtobool(cfg.get("restart", "no")))
@@ -475,8 +476,8 @@ if os.path.normpath(traj_dir) != ".":
     if not os.path.exists(traj_dir):
         os.makedirs(traj_dir, exist_ok=True)
 
-# checkpoint file
-cpfile = f"{traj_dir}/{outname}.chk"
+# checkpoint file (optional override path in control file)
+cpfile = cfg.get("checkpoint_file", "").strip() or f"{traj_dir}/{outname}.chk"
 runinfo_file = f"{traj_dir}/{outname}_runinfo.log"
 timestep = 0.015 * picoseconds
 fbsolu = 0.05 / picosecond
@@ -535,14 +536,72 @@ print(f"Running simulation at: {temp_prod} K for {mdsteps} steps")
 integrator = LangevinIntegrator(temp_prod, fbsolu, timestep)
 integrator.setConstraintTolerance(0.00001)
 simulation = Simulation(full_topology, full_system, integrator, platform, properties)
-
-simulation.context.setPositions(full_positions)
-simulation.context.setVelocitiesToTemperature(temp_prod)
 simulation.reporters = []
-simulation.reporters.append(DCDReporter(f"{traj_dir}/{outname}_equil.dcd", nstxout, append=False))
-simulation.reporters.append(
-    StateDataReporter(f"{traj_dir}/{outname}_equil.log", nstlog, step=True, time=True, potentialEnergy=True, kineticEnergy=True,
-                        totalEnergy=True, temperature=True, speed=True, separator='\t'))
+restart_from_chk = restart and os.path.isfile(cpfile)
+if restart and not os.path.isfile(cpfile):
+    print(
+        f"[warning] restart=yes but checkpoint not found ({cpfile}); "
+        "starting equilibration from initial coordinates."
+    )
+    restart_from_chk = False
+
+if restart_from_chk:
+    print(f"Restarting equilibration from checkpoint: {cpfile}")
+    try:
+        simulation.loadCheckpoint(cpfile)
+    except Exception as exc:
+        print(f"Error: could not load checkpoint {cpfile}: {exc}")
+        sys.exit(1)
+    steps_done = simulation.context.getState().getStepCount()
+    steps_to_run = max(0, mdsteps - steps_done)
+    print(
+        f"Checkpoint step count={steps_done}, equilibration target mdsteps={mdsteps} "
+        f"-> running {steps_to_run} additional steps."
+    )
+    simulation.reporters.append(
+        DCDReporter(f"{traj_dir}/{outname}_equil.dcd", nstxout, append=True)
+    )
+    simulation.reporters.append(
+        StateDataReporter(
+            f"{traj_dir}/{outname}_equil.log",
+            nstlog,
+            step=True,
+            time=True,
+            potentialEnergy=True,
+            kineticEnergy=True,
+            totalEnergy=True,
+            temperature=True,
+            speed=True,
+            separator='\t',
+            append=True,
+        )
+    )
+else:
+    simulation.context.setPositions(full_positions)
+    simulation.context.setVelocitiesToTemperature(temp_prod)
+    steps_to_run = mdsteps
+    simulation.reporters.append(
+        DCDReporter(f"{traj_dir}/{outname}_equil.dcd", nstxout, append=False)
+    )
+    simulation.reporters.append(
+        StateDataReporter(
+            f"{traj_dir}/{outname}_equil.log",
+            nstlog,
+            step=True,
+            time=True,
+            potentialEnergy=True,
+            kineticEnergy=True,
+            totalEnergy=True,
+            temperature=True,
+            speed=True,
+            separator='\t',
+            append=False,
+        )
+    )
+
+if nstchk > 0:
+    simulation.reporters.append(CheckpointReporter(cpfile, nstchk))
+    print(f"Periodic checkpointing enabled for equilibration: every {nstchk} steps -> {cpfile}")
 
 # run production simulation
 start_time = time.time()
@@ -553,7 +612,9 @@ _write_tracking_section(
     {
         "start_time_iso": script_start_iso,
         "control_file": ctrlfile,
-        "restart_mode": restart,
+        "checkpoint_file": cpfile,
+        "restart_mode": restart_from_chk,
+        "production_steps_planned": steps_to_run,
         "python_version": sys.version.replace("\n", " "),
         "numpy_version": _module_version(np),
         "parmed_version": _module_version(pmd),
@@ -577,7 +638,7 @@ if use_gpu:
     )
 print(f"[tracking] writing runtime metadata to {runinfo_file}")
 
-simulation.step(mdsteps)
+simulation.step(steps_to_run)
 
 # save checkpoint for the last state, before simulation is terminated
 simulation.saveCheckpoint(cpfile)
