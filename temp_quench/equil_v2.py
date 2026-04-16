@@ -120,6 +120,68 @@ def read_control_file(path: str) -> dict[str, str]:
     return cfg
 
 
+def parse_atom_index_selection(selection: str, max_index: int, index_base: int = 1) -> list[int]:
+    """Parse comma-separated indices/ranges into sorted unique 0-based indices."""
+    if not selection.strip():
+        return []
+
+    parsed: set[int] = set()
+    for raw_token in selection.split(","):
+        token = raw_token.strip()
+        if not token:
+            continue
+
+        if "-" in token:
+            left, sep, right = token.partition("-")
+            if not sep:
+                raise ValueError(f"Invalid range token '{token}'")
+            try:
+                start = int(left.strip())
+                end = int(right.strip())
+            except ValueError as exc:
+                raise ValueError(f"Invalid integer in range token '{token}'") from exc
+            if start > end:
+                raise ValueError(f"Range start > end in token '{token}'")
+            values = range(start, end + 1)
+        else:
+            try:
+                values = [int(token)]
+            except ValueError as exc:
+                raise ValueError(f"Invalid index token '{token}'") from exc
+
+        for idx in values:
+            idx0 = idx - index_base
+            if idx0 < 0 or idx0 >= max_index:
+                raise ValueError(
+                    f"Index {idx} (base {index_base}) out of valid range "
+                    f"[{index_base}, {max_index - 1 + index_base}]"
+                )
+            parsed.add(idx0)
+
+    return sorted(parsed)
+
+
+def add_position_restraints(system: System, reference_positions, restrained_indices: list[int], k_pos) -> int:
+    """Add harmonic positional restraints centered on reference positions."""
+    if not restrained_indices:
+        return 0
+
+    ref_nm = reference_positions.value_in_unit(nanometer)
+    restraint = CustomExternalForce("kpos*((x-x0)^2 + (y-y0)^2 + (z-z0)^2)")
+    restraint.addGlobalParameter("kpos", k_pos)
+    restraint.addPerParticleParameter("x0")
+    restraint.addPerParticleParameter("y0")
+    restraint.addPerParticleParameter("z0")
+    restraint.setName("EquilPositionalRestraint")
+
+    for atom_idx in restrained_indices:
+        x0, y0, z0 = ref_nm[atom_idx]
+        restraint.addParticle(atom_idx, [float(x0), float(y0), float(z0)])
+
+    system.addForce(restraint)
+    return len(restrained_indices)
+
+
 def replicate_cg_system_intra_only(template_system, n_copies):
     """
     Replicate an OpenMM template system n_copies times into one full system.
@@ -136,7 +198,6 @@ def replicate_cg_system_intra_only(template_system, n_copies):
       - CustomTorsionForce
       - CustomNonbondedForce
     """
-
     n_particles = template_system.getNumParticles()
     full_system = System()
 
@@ -160,24 +221,19 @@ def replicate_cg_system_intra_only(template_system, n_copies):
     # 3. forces
     # -----------------------------
     for force in template_system.getForces():
-
         # =========================================================
         # HarmonicBondForce
         # =========================================================
         if isinstance(force, HarmonicBondForce):
             new_force = HarmonicBondForce()
             new_force.setName(force.getName())
-            new_force.setUsesPeriodicBoundaryConditions(
-                force.usesPeriodicBoundaryConditions()
-            )
+            new_force.setUsesPeriodicBoundaryConditions(force.usesPeriodicBoundaryConditions())
             new_force.setForceGroup(force.getForceGroup())
-
             for copy_idx in range(n_copies):
                 offset = copy_idx * n_particles
                 for i in range(force.getNumBonds()):
                     p1, p2, length, k = force.getBondParameters(i)
                     new_force.addBond(p1 + offset, p2 + offset, length, k)
-
             full_system.addForce(new_force)
 
         # =========================================================
@@ -187,9 +243,7 @@ def replicate_cg_system_intra_only(template_system, n_copies):
             new_force = CustomAngleForce(force.getEnergyFunction())
             new_force.setName(force.getName())
             new_force.setForceGroup(force.getForceGroup())
-            new_force.setUsesPeriodicBoundaryConditions(
-                force.usesPeriodicBoundaryConditions()
-            )
+            new_force.setUsesPeriodicBoundaryConditions(force.usesPeriodicBoundaryConditions())
 
             # per-angle parameters
             for i in range(force.getNumPerAngleParameters()):
@@ -199,7 +253,7 @@ def replicate_cg_system_intra_only(template_system, n_copies):
             for i in range(force.getNumGlobalParameters()):
                 new_force.addGlobalParameter(
                     force.getGlobalParameterName(i),
-                    force.getGlobalParameterDefaultValue(i)
+                    force.getGlobalParameterDefaultValue(i),
                 )
 
             # angles
@@ -207,13 +261,7 @@ def replicate_cg_system_intra_only(template_system, n_copies):
                 offset = copy_idx * n_particles
                 for i in range(force.getNumAngles()):
                     p1, p2, p3, params = force.getAngleParameters(i)
-                    new_force.addAngle(
-                        p1 + offset,
-                        p2 + offset,
-                        p3 + offset,
-                        params
-                    )
-
+                    new_force.addAngle(p1 + offset, p2 + offset, p3 + offset, params)
             full_system.addForce(new_force)
 
         # =========================================================
@@ -222,25 +270,15 @@ def replicate_cg_system_intra_only(template_system, n_copies):
         elif isinstance(force, PeriodicTorsionForce):
             new_force = PeriodicTorsionForce()
             new_force.setName(force.getName())
-            new_force.setUsesPeriodicBoundaryConditions(
-                force.usesPeriodicBoundaryConditions()
-            )
+            new_force.setUsesPeriodicBoundaryConditions(force.usesPeriodicBoundaryConditions())
             new_force.setForceGroup(force.getForceGroup())
-
             for copy_idx in range(n_copies):
                 offset = copy_idx * n_particles
                 for i in range(force.getNumTorsions()):
                     p1, p2, p3, p4, periodicity, phase, k = force.getTorsionParameters(i)
                     new_force.addTorsion(
-                        p1 + offset,
-                        p2 + offset,
-                        p3 + offset,
-                        p4 + offset,
-                        periodicity,
-                        phase,
-                        k
+                        p1 + offset, p2 + offset, p3 + offset, p4 + offset, periodicity, phase, k
                     )
-
             full_system.addForce(new_force)
 
         # =========================================================
@@ -250,9 +288,7 @@ def replicate_cg_system_intra_only(template_system, n_copies):
             new_force = CustomTorsionForce(force.getEnergyFunction())
             new_force.setName(force.getName())
             new_force.setForceGroup(force.getForceGroup())
-            new_force.setUsesPeriodicBoundaryConditions(
-                force.usesPeriodicBoundaryConditions()
-            )
+            new_force.setUsesPeriodicBoundaryConditions(force.usesPeriodicBoundaryConditions())
 
             # per-torsion parameters
             for i in range(force.getNumPerTorsionParameters()):
@@ -262,7 +298,7 @@ def replicate_cg_system_intra_only(template_system, n_copies):
             for i in range(force.getNumGlobalParameters()):
                 new_force.addGlobalParameter(
                     force.getGlobalParameterName(i),
-                    force.getGlobalParameterDefaultValue(i)
+                    force.getGlobalParameterDefaultValue(i),
                 )
 
             # torsions
@@ -270,14 +306,7 @@ def replicate_cg_system_intra_only(template_system, n_copies):
                 offset = copy_idx * n_particles
                 for i in range(force.getNumTorsions()):
                     p1, p2, p3, p4, params = force.getTorsionParameters(i)
-                    new_force.addTorsion(
-                        p1 + offset,
-                        p2 + offset,
-                        p3 + offset,
-                        p4 + offset,
-                        params
-                    )
-
+                    new_force.addTorsion(p1 + offset, p2 + offset, p3 + offset, p4 + offset, params)
             full_system.addForce(new_force)
 
         # =========================================================
@@ -296,19 +325,16 @@ def replicate_cg_system_intra_only(template_system, n_copies):
                 new_force.setSwitchingDistance(force.getSwitchingDistance())
             new_force.setUseLongRangeCorrection(force.getUseLongRangeCorrection())
 
-
             # global parameters
             for i in range(force.getNumGlobalParameters()):
                 new_force.addGlobalParameter(
                     force.getGlobalParameterName(i),
-                    force.getGlobalParameterDefaultValue(i)
+                    force.getGlobalParameterDefaultValue(i),
                 )
 
             # per-particle parameters
             for i in range(force.getNumPerParticleParameters()):
-                new_force.addPerParticleParameter(
-                    force.getPerParticleParameterName(i)
-                )
+                new_force.addPerParticleParameter(force.getPerParticleParameterName(i))
 
             # tabulated functions, if any
             for i in range(force.getNumTabulatedFunctions()):
@@ -336,15 +362,13 @@ def replicate_cg_system_intra_only(template_system, n_copies):
                 stop = (copy_idx + 1) * n_particles
                 group = list(range(start, stop))
                 new_force.addInteractionGroup(group, group)
-
             full_system.addForce(new_force)
-
         else:
             raise NotImplementedError(
                 f"Unsupported force type: {type(force)} with name '{force.getName()}'"
             )
-
     return full_system
+
 
 def replicate_positions(template_positions, n_copies, shift=5.0 * nanometer):
     """
@@ -368,9 +392,7 @@ def replicate_positions(template_positions, n_copies, shift=5.0 * nanometer):
 
 
 def replicate_topology(template_topology, n_copies):
-    """
-    Replicate OpenMM topology n_copies times.
-    """
+    """Replicate OpenMM topology n_copies times."""
     full_topology = Topology()
     box_vectors = template_topology.getPeriodicBoxVectors()
     if box_vectors is not None:
@@ -395,7 +417,6 @@ def replicate_topology(template_topology, n_copies):
                         id=atom.id,
                         formalCharge=atom.formalCharge,
                     )
-
         for bond in template_topology.bonds():
             full_topology.addBond(
                 atom_map[bond.atom1],
@@ -403,40 +424,35 @@ def replicate_topology(template_topology, n_copies):
                 type=bond.type,
                 order=bond.order,
             )
-
     return full_topology
+
 
 ############## MAIN #################
 script_start_epoch = time.time()
 script_start_iso = datetime.now().astimezone().isoformat()
-
-
-usage = '\nUsage: python single_run.py -f control_file\n'
-############## MAIN #################
-ctrlfile = ''
+usage = "\nUsage: python equil_v2.py -f control_file\n"
+ctrlfile = ""
 if len(sys.argv) == 1:
     print(usage)
     sys.exit()
 
 try:
-    opts, args = getopt.getopt(sys.argv[1:], "hf:", ["ctrlfile="])
+    opts, _ = getopt.getopt(sys.argv[1:], "hf:", ["ctrlfile="])
 except getopt.GetoptError:
     print(usage)
     sys.exit()
 for opt, arg in opts:
-    if opt == '-h':
+    if opt == "-h":
         print(usage)
         sys.exit()
     elif opt in ("-f", "--ctrlfile"):
         ctrlfile = arg
-
 
 if not os.path.exists(ctrlfile):
     print("Error: cannot find control file " + ctrlfile + ".")
     sys.exit()
 
 cfg = read_control_file(ctrlfile)
-
 _CONTROL_KEYS_REQUIRED = (
     "psffile",
     "corfile",
@@ -444,7 +460,6 @@ _CONTROL_KEYS_REQUIRED = (
     "temp_prod",
     "outname",
     "mdsteps",
-    # "heating_steps",
 )
 _missing = [k for k in _CONTROL_KEYS_REQUIRED if k not in cfg]
 if _missing:
@@ -454,13 +469,10 @@ if _missing:
 psffile = cfg["psffile"]
 corfile = cfg["corfile"]
 prmfile = cfg["prmfile"]
-# high temperature to unfold protein
-temp_heating = float(cfg.get("temp_heating", "600")) * kelvin
-heating_steps = int(cfg.get("heating_steps", "1000000"))
+
 # production run
 temp_prod = float(cfg["temp_prod"]) * kelvin
 mdsteps = int(cfg["mdsteps"])
-
 n_copies = int(cfg.get("n_copies", "1")) # number of non-interacting chains
 outname = cfg["outname"]
 traj_dir = cfg.get("traj_dir", ".").strip() or "."
@@ -468,10 +480,15 @@ traj_dir = cfg.get("traj_dir", ".").strip() or "."
 # log and output frequency
 nstxout = int(cfg.get("nstxout", "5000"))
 nstlog = int(cfg.get("nstlog", "5000"))
+nstchk = int(cfg.get("nstchk", "50000"))
 
 ppn = str(cfg.get("ppn", "1"))
 restart = bool(strtobool(cfg.get("restart", "no")))
 use_gpu = bool(strtobool(cfg.get("use_gpu", "yes")))
+
+# restraint settings (equil_v2 only)
+restraint_idx_raw = cfg.get("restraint_idx", "").strip()
+restraint_k = float(cfg.get("restraint_k", "1000.0")) * kilojoule_per_mole / (nanometer ** 2)
 
 # Only create a subdirectory; default "." is the cwd and must not be mkdir'd
 if os.path.normpath(traj_dir) != ".":
@@ -480,7 +497,6 @@ if os.path.normpath(traj_dir) != ".":
 
 # checkpoint file (optional override path in control file)
 cpfile = cfg.get("checkpoint_file", "").strip() or f"{traj_dir}/{outname}.chk"
-nstchk = int(cfg.get("nstchk", "50000"))
 runinfo_file = f"{traj_dir}/{outname}_runinfo.log"
 timestep = 0.015 * picoseconds
 fbsolu = 0.05 / picosecond
@@ -510,8 +526,6 @@ for force in system.getForces():
         force.setUseSwitchingFunction(True)
         force.setSwitchingDistance(1.8 * nanometer)
 
-
-# prepare simulation
 if use_gpu:
     print("Running simulation on CUDA device")
     dev_index = 0
@@ -523,31 +537,60 @@ else:
     platform = Platform.getPlatformByName('CPU')
 
 positions = cor.positions
+template_n_atoms = system.getNumParticles()
+try:
+    restrained_template_indices = parse_atom_index_selection(
+        restraint_idx_raw, template_n_atoms, index_base=1
+    )
+except ValueError as exc:
+    print(
+        "Error: invalid restraint_idx format. Use comma-separated 1-based indices and/or ranges, "
+        f"for example '1-117,119-214'. Details: {exc}"
+    )
+    sys.exit(1)
 
-print("Preparing temperature quenching of multiple chains...")
+print("Preparing equilibration of multiple chains...")
 print(f"Number of chains in single simulations: {n_copies}")
+if restrained_template_indices:
+    print(
+        f"Positional restraints requested for {len(restrained_template_indices)} atoms "
+        "(per copy) via restraint_idx."
+    )
+else:
+    print("No positional restraints requested (restraint_idx is empty).")
 
-# Prepare temperature quenching of multiple chains
 full_system = replicate_cg_system_intra_only(system, n_copies)
 full_topology = replicate_topology(top, n_copies)
 full_positions = replicate_positions(positions, n_copies)
 full_structure = pmd.openmm.load_topology(full_topology, system=full_system, xyz=full_positions)
 full_structure.save(f"{traj_dir}/top.psf", overwrite=True)
 
+if restrained_template_indices:
+    restrained_full_indices = []
+    for copy_idx in range(n_copies):
+        offset = copy_idx * template_n_atoms
+        restrained_full_indices.extend(i + offset for i in restrained_template_indices)
+    n_restrained = add_position_restraints(
+        full_system, full_positions, restrained_full_indices, restraint_k
+    )
+    print(f"Applied positional restraints to {n_restrained} atoms total (k={restraint_k}).")
+
 restart_from_chk = restart and os.path.isfile(cpfile)
 if restart and not os.path.isfile(cpfile):
     print(
         f"[warning] restart=yes but checkpoint not found ({cpfile}); "
-        "running full heating + production protocol."
+        "starting equilibration from initial coordinates."
     )
     restart_from_chk = False
 
+print(f"Running simulation at: {temp_prod} K for {mdsteps} steps")
+integrator = LangevinIntegrator(temp_prod, fbsolu, timestep)
+integrator.setConstraintTolerance(0.00001)
+simulation = Simulation(full_topology, full_system, integrator, platform, properties)
+simulation.reporters = []
+
 if restart_from_chk:
-    # Continue production only: same System/Topology/integrator type as when the checkpoint was saved.
-    print(f"Restarting from checkpoint: {cpfile}")
-    integrator = LangevinIntegrator(temp_prod, fbsolu, timestep)
-    integrator.setConstraintTolerance(0.00001)
-    simulation = Simulation(full_topology, full_system, integrator, platform, properties)
+    print(f"Restarting equilibration from checkpoint: {cpfile}")
     try:
         simulation.loadCheckpoint(cpfile)
     except Exception as exc:
@@ -556,16 +599,13 @@ if restart_from_chk:
     steps_done = simulation.context.getState().getStepCount()
     steps_to_run = max(0, mdsteps - steps_done)
     print(
-        f"Checkpoint step count={steps_done}, production target mdsteps={mdsteps} "
-        f"→ running {steps_to_run} additional steps."
+        f"Checkpoint step count={steps_done}, equilibration target mdsteps={mdsteps} "
+        f"-> running {steps_to_run} additional steps."
     )
-    simulation.reporters = []
-    simulation.reporters.append(
-        DCDReporter(f"{traj_dir}/{outname}_quench.dcd", nstxout, append=True)
-    )
+    simulation.reporters.append(DCDReporter(f"{traj_dir}/{outname}_equil.dcd", nstxout, append=True))
     simulation.reporters.append(
         StateDataReporter(
-            f"{traj_dir}/{outname}_quench.log",
+            f"{traj_dir}/{outname}_equil.log",
             nstlog,
             step=True,
             time=True,
@@ -578,45 +618,31 @@ if restart_from_chk:
             append=True,
         )
     )
-    if nstchk > 0:
-        simulation.reporters.append(CheckpointReporter(cpfile, nstchk))
-        print(f"Periodic checkpointing enabled for quenching: every {nstchk} steps -> {cpfile}")
 else:
-    # Heating to high temperature
-    print(f"Heating to high temperature: {temp_heating} K for {heating_steps} steps")
-    integrator = LangevinIntegrator(temp_heating, fbsolu, timestep)
-    integrator.setConstraintTolerance(0.00001)
-    simulation = Simulation(full_topology, full_system, integrator, platform, properties)
     simulation.context.setPositions(full_positions)
-    simulation.context.setVelocitiesToTemperature(temp_heating)
-    simulation.reporters = []
-    simulation.reporters.append(DCDReporter(f"{traj_dir}/{outname}_heating.dcd", nstxout, append=False))
-    simulation.reporters.append(
-        StateDataReporter(f"{traj_dir}/{outname}_heating.log", nstlog, step=True, time=True, potentialEnergy=True, kineticEnergy=True,
-                            totalEnergy=True, temperature=True, speed=True, separator='\t'))
-    simulation.step(heating_steps)
-    # Get the final positions after heating
-    final_positions = simulation.context.getState(getPositions=True).getPositions()
-    # Quench to low temperature (new context at temp_prod before production)
-    print(f"Quenching to low temperature: {temp_prod} K for {mdsteps} steps")
-    integrator = LangevinIntegrator(temp_prod, fbsolu, timestep)
-    integrator.setConstraintTolerance(0.00001)
-    simulation = Simulation(full_topology, full_system, integrator, platform, properties)
-    simulation.context.setPositions(final_positions)
     simulation.context.setVelocitiesToTemperature(temp_prod)
-    simulation.reporters = []
-    simulation.reporters.append(DCDReporter(f"{traj_dir}/{outname}_quench.dcd", nstxout, append=False))
-    simulation.reporters.append(
-        StateDataReporter(f"{traj_dir}/{outname}_quench.log", nstlog, step=True, time=True, potentialEnergy=True, kineticEnergy=True,
-                            totalEnergy=True, temperature=True, speed=True, separator='\t'))
-    if nstchk > 0:
-        simulation.reporters.append(CheckpointReporter(cpfile, nstchk))
-        print(f"Periodic checkpointing enabled for quenching: every {nstchk} steps -> {cpfile}")
     steps_to_run = mdsteps
+    simulation.reporters.append(DCDReporter(f"{traj_dir}/{outname}_equil.dcd", nstxout, append=False))
+    simulation.reporters.append(
+        StateDataReporter(
+            f"{traj_dir}/{outname}_equil.log",
+            nstlog,
+            step=True,
+            time=True,
+            potentialEnergy=True,
+            kineticEnergy=True,
+            totalEnergy=True,
+            temperature=True,
+            speed=True,
+            separator="\t",
+            append=False,
+        )
+    )
 
-# run production simulation
-start_time = time.time()
-# Tracking-only metadata write (does not affect simulation behavior)
+if nstchk > 0:
+    simulation.reporters.append(CheckpointReporter(cpfile, nstchk))
+    print(f"Periodic checkpointing enabled for equilibration: every {nstchk} steps -> {cpfile}")
+
 _write_tracking_section(
     runinfo_file,
     "run_start",
@@ -638,6 +664,9 @@ _write_tracking_section(
         "requested_threads_ppn": ppn,
         "selected_platform": simulation.context.getPlatform().getName(),
         "use_gpu": use_gpu,
+        "restraint_enabled": bool(restrained_template_indices),
+        "restraint_atoms_per_copy": len(restrained_template_indices),
+        "restraint_k_kj_mol_nm2": f"{restraint_k.value_in_unit(kilojoule_per_mole/(nanometer**2)):.6f}",
     },
     mode="w",
 )
@@ -650,10 +679,8 @@ if use_gpu:
 print(f"[tracking] writing runtime metadata to {runinfo_file}")
 
 simulation.step(steps_to_run)
-
-# save checkpoint for the last state, before simulation is terminated
 simulation.saveCheckpoint(cpfile)
-# Tracking-only end-of-run metadata
+
 script_end_epoch = time.time()
 script_end_iso = datetime.now().astimezone().isoformat()
 elapsed_seconds = script_end_epoch - script_start_epoch
@@ -672,5 +699,3 @@ print(
     f"[tracking] end={script_end_iso}, elapsed={elapsed_seconds:.2f}s "
     f"({elapsed_seconds/60/60:.4f} h)"
 )
-
-

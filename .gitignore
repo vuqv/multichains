@@ -10,6 +10,10 @@
 traj/
 **/traj/
 
+#Python junk
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
 # OS junk
 .DS_Store
 ._*

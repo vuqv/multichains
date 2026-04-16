@@ -10,6 +10,7 @@ All scripts read a plain-text control file (`key = value`).
 ## Files
 
 - `equil.py`: single-stage equilibration at one target temperature (`temp_prod`).
+- `equil_v2.py`: single-stage equilibration + optional positional restraints.
 - `temp_quench.py`: baseline temperature-quench workflow.
 - `temp_quench_v2.py`: baseline workflow + optional positional restraints during heating only.
 - `control.cfg`: runtime configuration.
@@ -48,9 +49,9 @@ All scripts read a plain-text control file (`key = value`).
 
 This design protects long low-temperature runs from losing all progress after interruptions.
 
-## `equil.py` Workflow
+## `equil.py` and `equil_v2.py` Workflow
 
-`equil.py` is for a simpler one-stage protocol (no heating/quenching split):
+`equil.py` and `equil_v2.py` are for a simpler one-stage protocol (no heating/quenching split):
 
 1. Read `control.cfg` and build replicated multi-copy system (`n_copies`).
 2. Choose run mode:
@@ -62,12 +63,18 @@ This design protects long low-temperature runs from losing all progress after in
    - log: `{outname}_equil.log`
    - checkpoint: default `{outname}.chk` (or `checkpoint_file` if provided)
 
-Important behavior notes for `equil.py`:
+Important behavior notes (both `equil.py` and `equil_v2.py`):
 
 - It **does** support restart-from-checkpoint flow (`restart = yes`).
 - It **does** support periodic checkpoints via `nstchk` (if `nstchk > 0`).
 - It always writes a final checkpoint at the end.
 - It uses the same replicated intramolecular-only multi-copy setup as the quench scripts.
+
+Extra behavior in `equil_v2.py` only:
+
+- Supports `restraint_idx` (1-based indices/ranges) and `restraint_k`.
+- Applies harmonic positional restraints during equilibration (single-stage run).
+- Stores restraint settings in run-info metadata.
 
 ## Difference: `temp_quench.py` vs `temp_quench_v2.py`
 
@@ -92,6 +99,7 @@ In short: use `temp_quench.py` for the standard protocol, and `temp_quench_v2.py
 ## When to Use Which Script
 
 - `equil.py`: one-temperature equilibration/production only.
+- `equil_v2.py`: one-temperature equilibration/production with optional positional restraints.
 - `temp_quench.py`: two-stage heating then quenching, with quench restart + periodic quench checkpointing.
 - `temp_quench_v2.py`: same as `temp_quench.py`, plus heating-only positional restraints (`restraint_idx`, `restraint_k`).
 
@@ -99,6 +107,12 @@ In short: use `temp_quench.py` for the standard protocol, and `temp_quench_v2.py
 
 ```bash
 python equil.py -f control.cfg
+```
+
+or
+
+```bash
+python equil_v2.py -f control.cfg
 ```
 
 or
@@ -149,7 +163,7 @@ nstchk = 50000
 restart = no
 checkpoint_file = traj/test_run.chk
 
-# v2-only (ignored by temp_quench.py and equil.py)
+# v2-only (used by equil_v2.py and temp_quench_v2.py)
 restraint_idx = 1-100
 restraint_k = 1000.0
 ```
@@ -158,5 +172,5 @@ For restart after interruption, set `restart = yes` and keep the same `checkpoin
 
 ## Control File Notes
 
-- `restraint_idx` and `restraint_k` are used only by `temp_quench_v2.py`.
+- `restraint_idx` and `restraint_k` are used by `equil_v2.py` and `temp_quench_v2.py`.
 - Unknown keys are ignored by the parser, so one `control.cfg` can be reused across all scripts in this folder.

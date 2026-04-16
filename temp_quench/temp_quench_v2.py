@@ -565,7 +565,7 @@ if os.path.normpath(traj_dir) != ".":
 # checkpoint file (optional override path in control file)
 cpfile = cfg.get("checkpoint_file", "").strip() or f"{traj_dir}/{outname}.chk"
 nstchk = int(cfg.get("nstchk", "50000"))
-runinfo_file = outname + "_runinfo.log"
+runinfo_file = f"{traj_dir}/{outname}_runinfo.log"
 timestep = 0.015 * picoseconds
 fbsolu = 0.05 / picosecond
 
